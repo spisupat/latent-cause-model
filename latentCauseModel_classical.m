@@ -16,16 +16,22 @@ task = 'deterministic_reward';
 
 % Block specification: Comma separated characters indicating feature presence, alphabetically last character denotes outcome.
 blocks = {'A+','A'};               % E.g.: A+ denotes presence of A and reward(+), AX denotes presence of A,X, absence of reward.
-% probs = [0.8,0,1;0.8,0.5];          % For probabilistic_reward only, specify probabilities of each character
-nTrialsPerBlock = 30;
+% probs = [1,0.8;1,0.2];        % For probabilistic_reward only, specify probabilities of each character
+nTrialsPerBlock = 20;
 
 % CRP/Particle filter parameter
-scheme = 'importanceResampling';
+process = 'dynamicCRP';             % Prior process specificiation  - CRP/sticky CRP/dynamic CRP
+scheme = 'importanceResampling';    % Particle filtering scheme specification
+
 alpha = 0.1;                        % CRP concentration parameter
+eta = 0.5;                          % Dynamic CRP self-transition probability
+beta = 100;                         % Sticky CRP self-transition boost
+
 aPrior = 1;                         % Prior pseudocounts of feature presence
 bPrior = 1;                         % Prior pseudocounts of feature absence
 nVisCauses = 10;                    % Number of latent causes to visualize
 nParticles = 1000;                  % Number of particles
+linecolor = [0 0 0];
 
 %% Stimulus design
 
@@ -126,8 +132,22 @@ for t = 1:nTrials
             % Weigh by importance (likelihood) to estimate posterior, importance-weighted resample
             
             % Sample particles(t), counts(t) from CRP prior, based on counts(t-1)
-            [particles(:,t),nC] = generateCRprior(nC,alpha);
-            
+            if t == 1
+                [particles(:,t),nC] = generateCRprior(nC,alpha);
+            else
+                switch process
+                    % Chinese restaurant process prior (Gershman, Blei & Niv 2010)
+                    case 'CRP'
+                        [particles(:,t),nC] = generateCRprior(nC,alpha);
+                    % Sticky HDP-HMM prior with temporal boost (Fox et al 2011)
+                    case 'stickyCRP'
+                        [particles(:,t),nC] = generateStickyCRprior(particles(:,t-1),nC,alpha,beta);
+                    % CRP with constant self-transition (Lloyd & Leslie '13)
+                    case 'dynamicCRP'
+                        [particles(:,t),nC] = generateDynamicCRprior(particles(:,t-1),nC,alpha,eta);
+                end
+            end
+                                
             %Loop over particles
             for l = 1:nParticles
                 %Current hypothesized latent cause
@@ -191,7 +211,7 @@ for t = 1:nTrials
     
     % Plot estimated value i.e. predicted outcome probability
     subplot(3,2,6)
-    plot(rEst(1:t),'k-','LineWidth',1);
+    plot(rEst(1:t),'-','LineWidth',1,'color',linecolor);
     hold on
     for b = 1:length(blocks)
         plot([b*nTrialsPerBlock,b*nTrialsPerBlock],[0,1],'k--');
@@ -234,6 +254,37 @@ assignmentsT(row,1) = col;
 nKT = nKTminus1 + thisCount;
 end
 
+%% STICKY CRP/ STICKY HDP-HMM PROCESS
+
+% Partition/Assignments generator - generates "M" assignments for current trial (t) 
+% based on sticky HDP-HMM prior, i.e. based on counts from trial (t-1),
+% alpha, beta (stickiness boost) and previous trial assignments
+function [assignmentsT, nKT]= generateStickyCRprior(assignmentsTminus1,nKTminus1,alpha,beta)
+curr = repmat(linspace(1,size(nKTminus1,2),size(nKTminus1,2)),size(nKTminus1,1),1)==assignmentsTminus1;
+%  pAssignStickyCR = @(k,nk,K,alpha) (nk+beta*curr).*(k<=K)+alpha.*(k==K+1)+0.*(k>K+1))./(sum(nk,2)+alpha+beta);
+pAssignStickyCR = @(nk,alpha,beta,curr) ((nk+beta.*curr).*(1:size(nk,2)<=sum(nk>0,2))+alpha.*(1:size(nk,2)==sum(nk>0,2)+1)+0.*(1:size(nk,2)>sum(nk>0,2)+1))./(sum(nk,2)+alpha+beta);
+thisProb = pAssignStickyCR(nKTminus1,alpha,beta,curr);
+thisCount = mnrnd(1,thisProb);
+[row,col] = find(thisCount);
+assignmentsT(row,1) = col;
+nKT = nKTminus1 + thisCount;
+end
+
+%% DYNAMIC CRP/ CRP-HMM with constant self-transition probability
+
+% Partition/Assignments generator - generates "M" assignments for current trial (t) 
+% based on a CRP-HMM prior with constant self-transition prob.,i.e. based on counts from trial (t-1),
+% alpha, eta (self-transition probability) and previous trial assignments
+function [assignmentsT, nKT]= generateDynamicCRprior(assignmentsTminus1,nKTminus1,alpha,eta)
+curr = repmat(linspace(1,size(nKTminus1,2),size(nKTminus1,2)),size(nKTminus1,1),1)==assignmentsTminus1;
+%  pAssignDynamicCR = @(k,nk,K,alpha) eta*curr + (1-eta)*(nk.*(k<=K)+alpha.*(k==K+1)+0.*(k>K+1))./(sum(nk,2)+alpha);
+pAssignDynamicCR = @(nk,alpha,eta,curr) eta.*curr +(1-eta).*((nk).*(1:size(nk,2)<=sum(nk>0,2))+alpha.*(1:size(nk,2)==sum(nk>0,2)+1)+0.*(1:size(nk,2)>sum(nk>0,2)+1))./(sum(nk,2)+alpha);
+thisProb = pAssignDynamicCR(nKTminus1,alpha,eta,curr);
+thisCount = mnrnd(1,thisProb);
+[row,col] = find(thisCount);
+assignmentsT(row,1) = col;
+nKT = nKTminus1 + thisCount;
+end
 
 %% Weighted histogram
 function mass = weightedHist(x, weights, bins)
